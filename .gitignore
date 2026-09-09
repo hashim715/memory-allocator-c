@@ -1,0 +1,17 @@
+# Build output
+step1_bump
+main
+*.o
+*.out
+*.dSYM/
+
+# OS files
+.DS_Store
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+
+# Environment / secrets
+.env

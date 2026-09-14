@@ -1,25 +1,46 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <stdio.h>
-
 typedef struct block_meta {
     size_t size;
     int free;
     struct block_meta *next;
 } __attribute__((aligned(16))) block_meta;
 
+static block_meta* global_head = NULL;
+static block_meta* global_tail = NULL;
+
+block_meta *find_free_block(size_t requested_size) {
+    block_meta *curr = global_head;
+    while (curr != NULL) {
+        if (curr->free == 1 && curr->size >= requested_size) {
+            return curr;
+        }
+        curr = curr->next;
+    }
+    return NULL;
+};
+
 // header -> user pointer (move FORWARD past the header)
 void* block_to_ptr(block_meta *block) {
+    if (block == NULL) {
+        return NULL;
+    };
+
     return (void*)(block + 1);
 };
 
 // user pointer -> header (move BACKWARD to find the header)
 block_meta* ptr_to_block(void* user_ptr) {
+    if (user_ptr == NULL) {
+        return NULL;
+    };
+
     return (block_meta*)user_ptr - 1;
 };
 
 // a real, reusable helper: mmap a chunk and set up its header properly
-block_meta* make_block(int user_size) {
+block_meta* make_block(size_t user_size) {
     size_t size_to_request = sizeof(block_meta) + user_size;
 
     void* chunk = mmap(NULL, size_to_request, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -38,46 +59,85 @@ block_meta* make_block(int user_size) {
     return header;
 };
 
-int main(int argc, char** argv) {
-    // allocate a FEW blocks, as the Phase 1 success test asks for
-    block_meta *h1 = make_block(20);
-    block_meta *h2 = make_block(100);
-    block_meta *h3 = make_block(7);
- 
-    void *p1 = block_to_ptr(h1);
-    void *p2 = block_to_ptr(h2);
-    void *p3 = block_to_ptr(h3);
-
-    printf("Requested 20  -> header->size = %zu  %s\n", h1->size, h1->size == 20  ? "(correct)" : "(WRONG)");
-    printf("Requested 100 -> header->size = %zu  %s\n", h2->size, h2->size == 100 ? "(correct)" : "(WRONG)");
-    printf("Requested 7   -> header->size = %zu  %s\n", h3->size, h3->size == 7   ? "(correct)" : "(WRONG)");
-
-    printf("sizeof(block_meta) now = %zu\n", sizeof(block_meta));
-    printf("is multiple of 16?     = %s\n", (sizeof(block_meta) % 16 == 0) ? "yes" : "no");
-
-    // prove ptr_to_block correctly reverses block_to_ptr, using ONLY the user pointer
-    block_meta *recovered = ptr_to_block(p1);
-    printf("\nRecovered header from p1 alone -> size = %zu (should be 20)\n", recovered->size);
-    printf("recovered == h1? %s\n", (recovered == h1) ? "yes" : "no");
-
-    block_meta *headers[3] = { h1, h2, h3 };
-    void *ptrs[3] = { p1, p2, p3 };
-
-    for (int i = 0; i < 3; i++) {
-        block_meta *header = headers[i];
-
-        void *user_ptr = ptrs[i];
-
-        size_t bytes_between = (char*)user_ptr - (char*)header;
-
-        printf("\nblock %d:\n", i + 1);
-
-        printf("  mmap chunk starts at:  %p  (same address as header)\n", (void*)header);
-
-        printf("  user data pointer at:  %p\n", user_ptr);
-
-        printf("  bytes between them:    %zu  %s\n", bytes_between,
-               bytes_between == sizeof(block_meta) ? "(== sizeof(block_meta), correct)" : "(WRONG)");
-        printf("  requested size:        %zu\n", header->size);
+void* my_malloc(size_t size) {
+    if (size == 0) {
+        return NULL;
     };
+
+    block_meta* new_block = find_free_block(size);
+
+    if (new_block != NULL) {
+        new_block->free = 0;
+        return block_to_ptr(new_block);
+    };
+
+    new_block = make_block(size);
+
+    if (new_block == NULL) return NULL;
+
+    if (global_head == NULL) {
+        // Case A: list was empty. New node becomes BOTH head and tai
+        global_head = new_block;
+        global_tail = new_block;
+    } else {
+        // Case B: list already has at least one node (works for 1, 2, or 1000).
+        global_tail->next = new_block;
+        global_tail = new_block;
+    };
+
+    return block_to_ptr(new_block);
+};
+
+void my_free(void* ptr) {
+    block_meta* block = ptr_to_block(ptr);
+
+    if (block == NULL) {
+        return;
+    };
+
+    block->free = 1;
+};
+
+void print_list(void) {
+    block_meta *b = global_head;
+    int i = 0;
+    printf("--- list ---\n");
+    while (b != NULL) {
+        printf("  [%d] @ %p size=%zu free=%d next=%p\n", i, (void*)b, b->size, b->free, (void*)b->next);
+        b = b->next;
+        i++;
+    }
+    printf("head=%p tail=%p\n", (void*)global_head, (void*)global_tail);
+};
+
+int main(int argc, char** argv) { 
+    (void)argc;(void)argv;
+    
+    void *p1 = my_malloc(20);
+    void *p2 = my_malloc(100);
+    void *p3 = my_malloc(7);
+    (void)p1; (void)p2; (void)p3;
+
+    print_list();
+
+    void *a = my_malloc(20);
+    my_free(a);
+    void *b = my_malloc(10);
+    printf("\na==b? %s\n", (a == b) ? "YES (reuse works)" : "NO (bug)");
+
+
+    void *m1 = my_malloc(1000);
+    void *m2 = my_malloc(1000);
+    void *m3 = my_malloc(50);
+    void *m4 = my_malloc(1000);
+    void *m5 = my_malloc(1000);
+    my_free(m3);
+    void *reused = my_malloc(30);
+
+    printf("middle-block reuse: reused==m3? %s\n", (reused == m3) ? "YES" : "NO (bug)");
+    (void)m1; (void)m2; (void)m4; (void)m5;
+
+    print_list();
+
+    return 0;
 };

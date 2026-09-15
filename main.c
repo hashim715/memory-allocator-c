@@ -1,6 +1,10 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <stdio.h>
+
+#define SOME_MINIMUM 16
+#define MAX_ALLOC_SIZE (1UL << 30) // 1 GB — reject absurdly large / wrapped-negative requests
+
 typedef struct block_meta {
     size_t size;
     int free;
@@ -10,7 +14,13 @@ typedef struct block_meta {
 static block_meta* global_head = NULL;
 static block_meta* global_tail = NULL;
 
+void* block_to_ptr(block_meta *block);
+
 block_meta *find_free_block(size_t requested_size) {
+    if (requested_size == 0) {
+        return NULL;
+    };
+
     block_meta *curr = global_head;
     while (curr != NULL) {
         if (curr->free == 1 && curr->size >= requested_size) {
@@ -19,6 +29,32 @@ block_meta *find_free_block(size_t requested_size) {
         curr = curr->next;
     }
     return NULL;
+};
+
+void split_block(size_t size, block_meta *block) {
+    if (size == 0) {
+        return;
+    };
+
+    size_t requested_size = size + sizeof(block_meta);
+
+    block_meta *new_block = NULL;
+
+    if (block->size >= requested_size && (block->size - requested_size) >= (sizeof(block_meta) + (size_t)SOME_MINIMUM)) {
+        size_t leftover = block->size - requested_size;
+        // split
+        new_block = (block_meta*)((char*)block_to_ptr(block) + size);
+        new_block->size = (size_t)leftover;
+        new_block->free = 1;
+        new_block->next = NULL;
+    };
+
+    if (new_block != NULL) {
+        new_block->next = block->next;
+        block->next = new_block;
+    };
+
+    block->free = 0;
 };
 
 // header -> user pointer (move FORWARD past the header)
@@ -41,9 +77,17 @@ block_meta* ptr_to_block(void* user_ptr) {
 
 // a real, reusable helper: mmap a chunk and set up its header properly
 block_meta* make_block(size_t user_size) {
-    size_t size_to_request = sizeof(block_meta) + user_size;
+    if (user_size == 0) {
+        return NULL;
+    };
 
-    void* chunk = mmap(NULL, size_to_request, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    size_t page_size = sysconf(_SC_PAGESIZE);
+
+    size_t raw_needed = user_size + sizeof(block_meta);
+
+    size_t rounded = ((raw_needed + page_size - 1) / page_size) * page_size; // round up to next page
+
+    void* chunk = mmap(NULL, rounded, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 
     if (chunk == MAP_FAILED) {
         perror("mmap failed");
@@ -52,7 +96,7 @@ block_meta* make_block(size_t user_size) {
 
     block_meta* header = (block_meta*)chunk;
 
-    header->size = user_size;
+    header->size = rounded - sizeof(block_meta); // <-- store the TRUE usable size, not user_size
     header->free = 0;
     header->next = NULL;
 
@@ -60,14 +104,14 @@ block_meta* make_block(size_t user_size) {
 };
 
 void* my_malloc(size_t size) {
-    if (size == 0) {
+    if (size == 0 || size > MAX_ALLOC_SIZE) {
         return NULL;
     };
 
     block_meta* new_block = find_free_block(size);
 
     if (new_block != NULL) {
-        new_block->free = 0;
+        split_block(size, new_block);
         return block_to_ptr(new_block);
     };
 
@@ -124,7 +168,6 @@ int main(int argc, char** argv) {
     my_free(a);
     void *b = my_malloc(10);
     printf("\na==b? %s\n", (a == b) ? "YES (reuse works)" : "NO (bug)");
-
 
     void *m1 = my_malloc(1000);
     void *m2 = my_malloc(1000);

@@ -52,8 +52,12 @@ void split_block(size_t size, block_meta *block) {
     if (new_block != NULL) {
         new_block->next = block->next;
         block->next = new_block;
+        if (block == global_tail) {
+            global_tail = new_block;
+        };
     };
 
+    block->size = size; 
     block->free = 0;
 };
 

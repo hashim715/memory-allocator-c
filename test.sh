@@ -101,29 +101,80 @@ else
     fail "expected more than 8 nodes after split (leftover block missing), got $SECOND_BLOCK_COUNT"
 fi
 
-# The real signature of a correct split: a free=1 leftover block whose `next` points
-# directly at a much smaller free=0 block (the piece that was carved out and handed
-# to the caller). Detect that adjacency directly instead of just counting.
+# The real signature of a correct split: a small, used (free=0) block -- the exact-
+# fit piece carved out and handed to the caller -- immediately followed by a larger
+# free=1 leftover block (the remainder split_block put back in the list for reuse).
 SPLIT_SIGNATURE=$(echo "$SECOND_LIST" | awk '
     function get_size(line,    n) {
         n = split(line, parts, "size=")
         split(parts[2], rest, " ")
         return rest[1] + 0
     }
-    /free=1/ {
-        leftover_size = get_size($0)
+    /free=0/ {
+        used_size = get_size($0)
         getline nextline
-        if (nextline ~ /free=0/) {
-            used_size = get_size(nextline)
+        if (nextline ~ /free=1/) {
+            leftover_size = get_size(nextline)
             if (used_size < leftover_size) { print "found"; exit }
         }
     }
 ')
 
 if [ "$SPLIT_SIGNATURE" = "found" ]; then
-    pass "found split signature: free leftover block immediately followed by a smaller used block"
+    pass "found split signature: small used block immediately followed by a larger free leftover block"
 else
-    fail "no split signature found (free leftover -> smaller used block adjacency missing)"
+    fail "no split signature found (used block -> larger free leftover adjacency missing)"
+fi
+
+echo
+echo "=== Phase 4: coalesce merges adjacent free blocks ==="
+
+# Grab the THIRD print_list() dump (after q1,q2,q3 are freed).
+THIRD_LIST=$(echo "$OUTPUT" | awk '/--- list ---/{n++} n==3{print} n==3 && /^head=/{exit}')
+
+if [ -n "$THIRD_LIST" ]; then
+    pass "print_list produced output for the coalesce scenario"
+else
+    fail "print_list produced no output for the coalesce scenario"
+fi
+
+# q1, q2, q3 are all freed right after being allocated. If coalesce() works, they
+# merge with each other (and with the pre-existing free tail block) into ONE node,
+# instead of leaving 3 separate free=1 nodes sitting in the list.
+THIRD_BLOCK_COUNT=$(echo "$THIRD_LIST" | grep -c '^\s*\[')
+SECOND_BLOCK_COUNT_FOR_PHASE4=$(echo "$SECOND_LIST" | grep -c '^\s*\[')
+
+if [ "$THIRD_BLOCK_COUNT" -le "$SECOND_BLOCK_COUNT_FOR_PHASE4" ]; then
+    pass "node count did not grow after freeing q1/q2/q3 ($SECOND_BLOCK_COUNT_FOR_PHASE4 -> $THIRD_BLOCK_COUNT nodes) -- adjacent free blocks merged"
+else
+    fail "node count grew after freeing q1/q2/q3 ($SECOND_BLOCK_COUNT_FOR_PHASE4 -> $THIRD_BLOCK_COUNT) -- coalesce did not merge them"
+fi
+
+# There should be no more than one free=1 node left dangling as separate, unmerged
+# neighbors -- i.e. no two CONSECUTIVE list entries should both be free=1, since a
+# working coalesce() would have merged any such pair into a single node already.
+CONSECUTIVE_FREE_PAIR=$(echo "$THIRD_LIST" | awk '
+    /free=1/ {
+        getline nextline
+        if (nextline ~ /free=1/) { print "found"; exit }
+    }
+')
+
+if [ "$CONSECUTIVE_FREE_PAIR" != "found" ]; then
+    pass "no two consecutive free blocks left unmerged in the list"
+else
+    fail "found two consecutive free=1 blocks -- coalesce failed to merge them"
+fi
+
+# The final free block's size should reflect the merge: it must be strictly larger
+# than any single freshly-mmap'd block would be on its own (i.e. bigger than what a
+# lone my_malloc(20000) chunk would produce), proving multiple blocks were absorbed.
+LAST_FREE_SIZE=$(echo "$THIRD_LIST" | awk '/free=1/ { match($0, /size=[0-9]+/); s = substr($0, RSTART+5, RLENGTH-5); last = s } END { print last+0 }')
+
+if [ "$LAST_FREE_SIZE" -gt 32736 ]; then
+    pass "merged free block size ($LAST_FREE_SIZE) exceeds a single fresh block's size -- multiple blocks absorbed"
+else
+    fail "merged free block size ($LAST_FREE_SIZE) too small -- coalesce did not absorb multiple blocks"
 fi
 
 echo

@@ -9,6 +9,7 @@ typedef struct block_meta {
     size_t size;
     int free;
     struct block_meta *next;
+    struct block_meta *previous;
 } __attribute__((aligned(16))) block_meta;
 
 static block_meta* global_head = NULL;
@@ -27,7 +28,7 @@ block_meta *find_free_block(size_t requested_size) {
             return curr;
         }
         curr = curr->next;
-    }
+    };
     return NULL;
 };
 
@@ -51,13 +52,17 @@ void split_block(size_t size, block_meta *block) {
 
     if (new_block != NULL) {
         new_block->next = block->next;
+        new_block->previous = block;
+        if (block->next != NULL) {
+            block->next->previous = new_block;
+        }
         block->next = new_block;
         if (block == global_tail) {
             global_tail = new_block;
         };
+        block->size = size; 
     };
 
-    block->size = size; 
     block->free = 0;
 };
 
@@ -103,6 +108,7 @@ block_meta* make_block(size_t user_size) {
     header->size = rounded - sizeof(block_meta); // <-- store the TRUE usable size, not user_size
     header->free = 0;
     header->next = NULL;
+    header->previous = NULL;
 
     return header;
 };
@@ -130,10 +136,40 @@ void* my_malloc(size_t size) {
     } else {
         // Case B: list already has at least one node (works for 1, 2, or 1000).
         global_tail->next = new_block;
+        new_block->previous = global_tail;
         global_tail = new_block;
     };
 
     return block_to_ptr(new_block);
+};
+
+int is_physically_adjacent(block_meta *first, block_meta *second) {
+    char *end_of_first = (char*)block_to_ptr(first) + first->size;
+    return (char*)second == end_of_first;
+};
+
+void coalesce(block_meta *block) {
+    if (block->next != NULL && block->next->free == 1 && is_physically_adjacent(block, block->next)) {
+        block->size += block->next->size + sizeof(block_meta);
+        if (block->next->next != NULL) {
+            block->next->next->previous = block;
+        };
+        if (block->next == global_tail) {
+            global_tail = block;
+        };
+        block->next = block->next->next;
+    };
+
+    if (block->previous != NULL && block->previous->free == 1 && is_physically_adjacent(block->previous,block)) {
+        block->previous->size += block->size + sizeof(block_meta);
+        block->previous->next = block->next;
+        if (block->next != NULL) {
+            block->next->previous = block->previous;
+        };
+        if (block == global_tail) {
+            global_tail = block->previous;
+        };
+    };
 };
 
 void my_free(void* ptr) {
@@ -144,6 +180,7 @@ void my_free(void* ptr) {
     };
 
     block->free = 1;
+    coalesce(block);
 };
 
 void print_list(void) {
@@ -158,16 +195,17 @@ void print_list(void) {
     printf("head=%p tail=%p\n", (void*)global_head, (void*)global_tail);
 };
 
-int main(int argc, char** argv) { 
+int main(int argc, char** argv) {
     (void)argc;(void)argv;
-    
+
+    // Phase 1: my_malloc allocates memory
     void *p1 = my_malloc(20);
     void *p2 = my_malloc(100);
     void *p3 = my_malloc(7);
     (void)p1; (void)p2; (void)p3;
-
     print_list();
 
+    // Phase 2: find_free_block / my_free reuse a freed block
     void *a = my_malloc(20);
     my_free(a);
     void *b = my_malloc(10);
@@ -175,14 +213,28 @@ int main(int argc, char** argv) {
 
     void *m1 = my_malloc(1000);
     void *m2 = my_malloc(1000);
-    void *m3 = my_malloc(50);
+    void *m3 = my_malloc(5000);
     void *m4 = my_malloc(1000);
     void *m5 = my_malloc(1000);
     my_free(m3);
     void *reused = my_malloc(30);
-
     printf("middle-block reuse: reused==m3? %s\n", (reused == m3) ? "YES" : "NO (bug)");
     (void)m1; (void)m2; (void)m4; (void)m5;
+
+    // Phase 3: split_block carves the reused block into used + leftover
+    print_list();
+
+    // Phase 4: coalesce merges adjacent free blocks back together.
+    // Request sizes larger than any existing free block so make_block() mmaps
+    // fresh, physically-adjacent chunks instead of reusing the split leftover.
+    void *q1 = my_malloc(20000);
+    void *q2 = my_malloc(20000);
+    void *q3 = my_malloc(20000);
+    (void)q1; (void)q2; (void)q3;
+
+    my_free(q1);
+    my_free(q2);
+    my_free(q3);
 
     print_list();
 

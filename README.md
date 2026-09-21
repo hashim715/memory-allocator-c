@@ -13,6 +13,7 @@ This is a learning project exploring how low-level memory allocators work under 
   - `my_malloc(size)` rejects `0` and anything above `MAX_ALLOC_SIZE` (a 1 GB sanity cap, since a wrapped-negative `size_t` looks like a huge request), then calls `find_free_block()` to scan the list for a previously freed block big enough to reuse; only if none is found does it `mmap` a new block and append it to the tail of the list.
   - `find_free_block()` scans the list for the first free block with enough capacity for the request.
   - `split_block()` carves a reused free block into two: a block sized exactly to the request (marked used) and, if enough space remains (past `sizeof(block_meta) + SOME_MINIMUM`), a leftover block marked free and reinserted into the list for future reuse — avoiding wasted space when a large freed block satisfies a much smaller request. If the remainder is too small to be worth splitting, the whole block is handed over as-is and its original size is left untouched.
+  - `my_calloc(count, size)` computes `count * size`, checking for multiplication overflow before allocating, calls `my_malloc()`, and zeroes the returned memory with `memset()` — the zero-initialization `malloc` doesn't provide.
   - `my_free(ptr)` recovers the block header from the user pointer, marks it free, and calls `coalesce()` to merge it with any adjacent free neighbors.
   - `is_physically_adjacent()` checks whether one block sits immediately after another in memory (not just in the list), which is what makes merging safe.
   - `coalesce()` merges a freed block with its `next` and/or `previous` neighbor when they are both free and physically adjacent, absorbing their size and unlinking the now-redundant node(s) — this can chain across more than two blocks, since freeing three adjacent blocks in a row folds them all into one.
@@ -37,12 +38,13 @@ clang -o main main.c
 
 ## Testing
 
-`test.sh` builds `main.c` and checks its output in four phases:
+`test.sh` builds `main.c` and checks its output in five phases:
 
 - **Phase 1** — confirms `my_malloc` actually allocates memory (the initial 3 blocks show up in `print_list`, marked in-use).
 - **Phase 2** — confirms `find_free_block`, `my_free`, and the linked list work together: a freed block gets reused (including a block in the *middle* of the list), and `print_list` reflects head/tail pointers and free/used status correctly.
 - **Phase 3** — confirms `split_block` actually carves a reused block in two: the list grows a new node after the split, and the dump shows the split "signature" — a small used block immediately followed by a larger free leftover block.
 - **Phase 4** — confirms `coalesce` merges adjacent free blocks: after freeing several freshly allocated, physically-adjacent blocks, the node count doesn't grow, no two consecutive list entries are left free and unmerged, and the resulting free block's size reflects multiple blocks being absorbed into one.
+- **Phase 5** — confirms `my_calloc` zero-initializes its returned memory, and correctly rejects both a `count * size` multiplication overflow and a `size == 0` request instead of misbehaving on either.
 
 ```sh
 ./test.sh

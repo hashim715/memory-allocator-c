@@ -1,6 +1,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <stdio.h>
+#include <string.h>
 
 #define SOME_MINIMUM 16
 #define MAX_ALLOC_SIZE (1UL << 30) // 1 GB — reject absurdly large / wrapped-negative requests
@@ -143,6 +144,24 @@ void* my_malloc(size_t size) {
     return block_to_ptr(new_block);
 };
 
+void* my_calloc(size_t count,size_t size) {
+    if (size == 0 || size > MAX_ALLOC_SIZE) {
+        return NULL;
+    };
+
+    size_t total = size * count;
+
+    if (count != 0 && total / count != size) return NULL;
+
+    void* ptr = my_malloc(total);
+
+    if (ptr == NULL) return NULL;   // <-- add this
+
+    memset(ptr, 0, total);
+
+    return ptr;
+};
+
 int is_physically_adjacent(block_meta *first, block_meta *second) {
     char *end_of_first = (char*)block_to_ptr(first) + first->size;
     return (char*)second == end_of_first;
@@ -237,6 +256,25 @@ int main(int argc, char** argv) {
     my_free(q3);
 
     print_list();
+
+    // Phase 5: my_calloc zero-initializes memory and rejects bad input
+    unsigned char *z = (unsigned char*)my_calloc(10, sizeof(unsigned char));
+    int all_zero = 1;
+    for (size_t i = 0; i < 10; i++) {
+        if (z[i] != 0) {
+            all_zero = 0;
+            break;
+        }
+    }
+    printf("\nmy_calloc zero-initialized? %s\n", all_zero ? "YES" : "NO (bug)");
+
+    // count * size overflows size_t -- must be rejected, not silently wrapped
+    void *overflow = my_calloc((size_t)-1, 2);
+    printf("my_calloc overflow rejected? %s\n", (overflow == NULL) ? "YES" : "NO (bug)");
+
+    // size == 0 must be rejected, same as my_malloc(0)
+    void *zero_size = my_calloc(5, 0);
+    printf("my_calloc size=0 rejected? %s\n", (zero_size == NULL) ? "YES" : "NO (bug)");
 
     return 0;
 };

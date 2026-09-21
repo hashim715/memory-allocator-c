@@ -178,6 +178,27 @@ else
 fi
 
 echo
+echo "=== Phase 5: my_calloc zero-initializes memory and rejects bad input ==="
+
+if echo "$OUTPUT" | grep -q "my_calloc zero-initialized? YES"; then
+    pass "my_calloc zero-initializes the returned memory"
+else
+    fail "my_calloc did not zero-initialize memory"
+fi
+
+if echo "$OUTPUT" | grep -q "my_calloc overflow rejected? YES"; then
+    pass "my_calloc rejects count*size overflow instead of wrapping"
+else
+    fail "my_calloc did not reject an overflowing count*size"
+fi
+
+if echo "$OUTPUT" | grep -q "my_calloc size=0 rejected? YES"; then
+    pass "my_calloc rejects size=0, same as my_malloc(0)"
+else
+    fail "my_calloc did not reject size=0"
+fi
+
+echo
 echo "=== Summary ==="
 echo "Passed: $PASS"
 echo "Failed: $FAIL"

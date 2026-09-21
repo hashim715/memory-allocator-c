@@ -144,24 +144,6 @@ void* my_malloc(size_t size) {
     return block_to_ptr(new_block);
 };
 
-void* my_calloc(size_t count,size_t size) {
-    if (size == 0 || size > MAX_ALLOC_SIZE) {
-        return NULL;
-    };
-
-    size_t total = size * count;
-
-    if (count != 0 && total / count != size) return NULL;
-
-    void* ptr = my_malloc(total);
-
-    if (ptr == NULL) return NULL;   // <-- add this
-
-    memset(ptr, 0, total);
-
-    return ptr;
-};
-
 int is_physically_adjacent(block_meta *first, block_meta *second) {
     char *end_of_first = (char*)block_to_ptr(first) + first->size;
     return (char*)second == end_of_first;
@@ -200,6 +182,82 @@ void my_free(void* ptr) {
 
     block->free = 1;
     coalesce(block);
+};
+
+void* my_calloc(size_t count,size_t size) {
+    if (size == 0 || size > MAX_ALLOC_SIZE) {
+        return NULL;
+    };
+
+    size_t total = size * count;
+
+    if (count != 0 && total / count != size) return NULL;
+
+    void* ptr = my_malloc(total);
+
+    if (ptr == NULL) return NULL;   // <-- add this
+
+    memset(ptr, 0, total);
+
+    return ptr;
+};
+
+void* my_realloc(void* ptr, size_t new_size) {
+    if (new_size > MAX_ALLOC_SIZE) {
+        return NULL;
+    };
+
+    if (ptr == NULL) return my_malloc(new_size);
+
+    if (new_size == 0) {
+        my_free(ptr);
+        return NULL;
+    };
+
+    block_meta* block = ptr_to_block(ptr);
+
+    if (new_size <= block->size) {
+        split_block(new_size, block);
+        return block_to_ptr(block);
+    };
+
+    if (block->next != NULL && block->next->free == 1 && is_physically_adjacent(block, block->next) && block->size + block->next->size + sizeof(block_meta) >= new_size) {
+        block->size += block->next->size + sizeof(block_meta);
+        if (block->next->next != NULL) {
+            block->next->next->previous = block;
+        };
+        if (block->next == global_tail) {
+            global_tail = block;
+        };
+        block->next = block->next->next;
+        split_block(new_size,block);
+        return block_to_ptr(block);
+    };
+
+    if (block->previous != NULL && block->previous->free == 1 && is_physically_adjacent(block->previous,block) && block->previous->size + block->size + sizeof(block_meta) >= new_size) {
+        block->previous->size += block->size + sizeof(block_meta);
+        block->previous->next = block->next;
+        if (block->next != NULL) {
+            block->next->previous = block->previous;
+        };
+        if (block == global_tail) {
+            global_tail = block->previous;
+        };
+        memmove(block_to_ptr(block->previous), ptr, block->size);
+        block->previous->free = 0;
+        split_block(new_size,block->previous);
+        return block_to_ptr(block->previous);
+    };
+
+    void* new_ptr = my_malloc(new_size);
+
+    if (new_ptr == NULL) return NULL;
+
+    memcpy(new_ptr,ptr,block->size);
+
+    my_free(ptr);
+
+    return new_ptr;
 };
 
 void print_list(void) {
@@ -244,8 +302,6 @@ int main(int argc, char** argv) {
     print_list();
 
     // Phase 4: coalesce merges adjacent free blocks back together.
-    // Request sizes larger than any existing free block so make_block() mmaps
-    // fresh, physically-adjacent chunks instead of reusing the split leftover.
     void *q1 = my_malloc(20000);
     void *q2 = my_malloc(20000);
     void *q3 = my_malloc(20000);
@@ -257,24 +313,53 @@ int main(int argc, char** argv) {
 
     print_list();
 
-    // Phase 5: my_calloc zero-initializes memory and rejects bad input
-    unsigned char *z = (unsigned char*)my_calloc(10, sizeof(unsigned char));
+    // Phase 5: my_calloc zero-initializes memory and rejects bad input (overflow, size=0).
+    // my_realloc: NULL acts like my_malloc, new_size=0 acts like my_free. Shrinking (or
+    // requesting the same size) reuses split_block() to return the same block, resized
+    // in place. Growing tries to absorb an adjacent free neighbor first, and only
+    // falls back to a fresh my_malloc + copy + my_free if no adjacent space fits.
+
+   char *z = (char*)my_calloc(10, sizeof(char));
     int all_zero = 1;
     for (size_t i = 0; i < 10; i++) {
         if (z[i] != 0) {
             all_zero = 0;
             break;
-        }
-    }
+        };
+    };
     printf("\nmy_calloc zero-initialized? %s\n", all_zero ? "YES" : "NO (bug)");
 
-    // count * size overflows size_t -- must be rejected, not silently wrapped
     void *overflow = my_calloc((size_t)-1, 2);
     printf("my_calloc overflow rejected? %s\n", (overflow == NULL) ? "YES" : "NO (bug)");
 
-    // size == 0 must be rejected, same as my_malloc(0)
     void *zero_size = my_calloc(5, 0);
     printf("my_calloc size=0 rejected? %s\n", (zero_size == NULL) ? "YES" : "NO (bug)");
+
+    void *r_null = my_realloc(NULL, 40);
+    printf("\nmy_realloc(NULL, size) behaves like my_malloc? %s\n", (r_null != NULL) ? "YES" : "NO (bug)");
+
+    void *r_freeme = my_malloc(40);
+    void *r_freed = my_realloc(r_freeme, 0);
+    void *r_reuse_check = my_malloc(40);
+    printf("my_realloc(ptr, 0) frees block (reused after)? %s\n", (r_freed == NULL && r_reuse_check == r_freeme) ? "YES" : "NO (bug)");
+
+    void *r_big = my_malloc(500);
+    void *r_shrunk = my_realloc(r_big, 50);
+    printf("my_realloc shrink keeps same pointer? %s\n", (r_shrunk == r_big) ? "YES" : "NO (bug)");
+
+    void *r_first = my_malloc(200);
+    void *r_second = my_malloc(200);
+    my_free(r_second);
+    void *r_grown = my_realloc(r_first, 300);
+    printf("my_realloc grow merges adjacent free neighbor (same pointer)? %s\n", (r_grown == r_first) ? "YES" : "NO (bug)");
+
+    void *r_data = my_malloc(20);
+    memcpy(r_data, "hello-realloc-data", 19);
+    void *r_moved = my_realloc(r_data, 50000);
+    int r_data_preserved = (r_moved != NULL) && (memcmp(r_moved, "hello-realloc-data", 19) == 0);
+    printf("my_realloc fallback moves and preserves data? %s\n", r_data_preserved ? "YES" : "NO (bug)");
+
+    print_list();
 
     return 0;
 };

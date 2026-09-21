@@ -199,6 +199,39 @@ else
 fi
 
 echo
+echo "--- Phase 5 (continued): my_realloc ---"
+
+if echo "$OUTPUT" | grep -q "my_realloc(NULL, size) behaves like my_malloc? YES"; then
+    pass "my_realloc(NULL, size) behaves like my_malloc"
+else
+    fail "my_realloc(NULL, size) did not behave like my_malloc"
+fi
+
+if echo "$OUTPUT" | grep -q "my_realloc(ptr, 0) frees block (reused after)? YES"; then
+    pass "my_realloc(ptr, 0) frees the block and it becomes reusable"
+else
+    fail "my_realloc(ptr, 0) did not free/reuse the block correctly"
+fi
+
+if echo "$OUTPUT" | grep -q "my_realloc shrink keeps same pointer? YES"; then
+    pass "my_realloc shrinks in place, keeping the same pointer"
+else
+    fail "my_realloc shrink did not keep the same pointer"
+fi
+
+if echo "$OUTPUT" | grep -q "my_realloc grow merges adjacent free neighbor (same pointer)? YES"; then
+    pass "my_realloc grows in place by merging an adjacent free neighbor"
+else
+    fail "my_realloc did not merge the adjacent free neighbor when growing"
+fi
+
+if echo "$OUTPUT" | grep -q "my_realloc fallback moves and preserves data? YES"; then
+    pass "my_realloc falls back to malloc+copy+free and preserves data when it must move"
+else
+    fail "my_realloc fallback did not preserve data across the move"
+fi
+
+echo
 echo "=== Summary ==="
 echo "Passed: $PASS"
 echo "Failed: $FAIL"

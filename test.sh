@@ -232,6 +232,57 @@ else
 fi
 
 echo
+echo "=== Phase 6: large allocations bypass the free list via mmap/munmap ==="
+
+if echo "$OUTPUT" | grep -q "is this is_mmapped block? YES"; then
+    pass "a request >= MMAP_THRESHOLD is marked is_mmapped"
+else
+    fail "a request >= MMAP_THRESHOLD was not marked is_mmapped"
+fi
+
+# Grab the FOURTH print_list() dump (the final one, after the mmap'd block was allocated).
+FOURTH_LIST=$(echo "$OUTPUT" | awk '/--- list ---/{n++} n==4{print} n==4 && /^head=/{exit}')
+
+if [ -n "$FOURTH_LIST" ]; then
+    pass "print_list produced output after the mmap'd allocation"
+else
+    fail "print_list produced no output after the mmap'd allocation"
+fi
+
+# The is_mmapped block must NEVER be linked into global_head/global_tail, so it should
+# never show up in print_list's walk -- no node in this dump should have size=131072
+# (128*1024, the exact size requested for the mmap'd block).
+if echo "$FOURTH_LIST" | grep -q "size=131072"; then
+    fail "the mmap'd block appeared in print_list -- it leaked into the shared free list"
+else
+    pass "the mmap'd block is excluded from print_list (not linked into the free list)"
+fi
+
+if echo "$OUTPUT" | grep -q "below-threshold block NOT is_mmapped? YES"; then
+    pass "a request just below MMAP_THRESHOLD is NOT marked is_mmapped"
+else
+    fail "a request just below MMAP_THRESHOLD was incorrectly marked is_mmapped"
+fi
+
+if echo "$OUTPUT" | grep -q "mmap'd block munmapped, not reused via free list? YES"; then
+    pass "my_free munmaps an is_mmapped block instead of returning it to the free list"
+else
+    fail "my_free did not correctly munmap the is_mmapped block"
+fi
+
+if echo "$OUTPUT" | grep -q "my_realloc grows mmap'd block via move, data preserved? YES"; then
+    pass "my_realloc grows an is_mmapped block via malloc+copy+free, preserving data"
+else
+    fail "my_realloc did not correctly grow the is_mmapped block"
+fi
+
+if echo "$OUTPUT" | grep -q "my_realloc shrinks mmap'd block in place (same pointer)? YES"; then
+    pass "my_realloc shrinks an is_mmapped block in place, returning the same pointer"
+else
+    fail "my_realloc did not return the same pointer when shrinking the is_mmapped block"
+fi
+
+echo
 echo "=== Summary ==="
 echo "Passed: $PASS"
 echo "Failed: $FAIL"

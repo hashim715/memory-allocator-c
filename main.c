@@ -5,10 +5,12 @@
 
 #define SOME_MINIMUM 16
 #define MAX_ALLOC_SIZE (1UL << 30) // 1 GB — reject absurdly large / wrapped-negative requests
+#define MMAP_THRESHOLD (128 * 1024)
 
 typedef struct block_meta {
     size_t size;
     int free;
+    int is_mmapped;
     struct block_meta *next;
     struct block_meta *previous;
 } __attribute__((aligned(16))) block_meta;
@@ -110,6 +112,7 @@ block_meta* make_block(size_t user_size) {
     header->free = 0;
     header->next = NULL;
     header->previous = NULL;
+    header->is_mmapped = 0;
 
     return header;
 };
@@ -117,6 +120,13 @@ block_meta* make_block(size_t user_size) {
 void* my_malloc(size_t size) {
     if (size == 0 || size > MAX_ALLOC_SIZE) {
         return NULL;
+    };
+
+    if (size >= MMAP_THRESHOLD) {
+        block_meta* new_block = make_block(size);
+        if (new_block == NULL) return NULL;
+        new_block->is_mmapped = 1;
+        return block_to_ptr(new_block);
     };
 
     block_meta* new_block = find_free_block(size);
@@ -180,6 +190,14 @@ void my_free(void* ptr) {
         return;
     };
 
+    if (block->is_mmapped) {
+        int result = munmap(block,block->size + sizeof(block_meta));
+        if (result == -1) {
+            perror("munmap failed");
+        };
+        return;
+    };
+
     block->free = 1;
     coalesce(block);
 };
@@ -215,6 +233,18 @@ void* my_realloc(void* ptr, size_t new_size) {
     };
 
     block_meta* block = ptr_to_block(ptr);
+
+    if (block->is_mmapped) {
+        if (new_size > block->size) {
+            void* new_ptr = my_malloc(new_size);
+            if (new_ptr == NULL) return NULL;
+            memcpy(new_ptr,ptr,block->size);
+            my_free(ptr);
+            return new_ptr;
+        } else {
+            return ptr;
+        };
+    };
 
     if (new_size <= block->size) {
         split_block(new_size, block);
@@ -358,6 +388,33 @@ int main(int argc, char** argv) {
     void *r_moved = my_realloc(r_data, 50000);
     int r_data_preserved = (r_moved != NULL) && (memcmp(r_moved, "hello-realloc-data", 19) == 0);
     printf("my_realloc fallback moves and preserves data? %s\n", r_data_preserved ? "YES" : "NO (bug)");
+
+    print_list();
+
+    // Phase 6: requests >= MMAP_THRESHOLD get their own mmap'd block (is_mmapped=1),
+    // kept out of the shared free list, and my_free() munmaps them directly.
+    void *mmap_big_block = my_malloc(128*1024);
+    block_meta *is_mmapped_block = ptr_to_block(mmap_big_block);
+    printf("is this is_mmapped block? %s\n", (is_mmapped_block->is_mmapped) ? "YES" : "NO (bug)");
+
+    void *below_threshold = my_malloc(128 * 1024 - 1);
+    block_meta *below_block = ptr_to_block(below_threshold);
+    printf("below-threshold block NOT is_mmapped? %s\n", (!below_block->is_mmapped) ? "YES" : "NO (bug)");
+
+    void *mmap_to_free = my_malloc(200000);
+    my_free(mmap_to_free);
+    void *after_free_small = my_malloc(20);
+    printf("mmap'd block munmapped, not reused via free list? %s\n", (after_free_small != mmap_to_free) ? "YES" : "NO (bug)");
+
+    void *mmap_grow = my_malloc(200000);
+    memset(mmap_grow, 0xAB, 200000);
+    void *mmap_grown = my_realloc(mmap_grow, 400000);
+    int mmap_grow_preserved = (mmap_grown != mmap_grow) && (((unsigned char*)mmap_grown)[0] == 0xAB) && (((unsigned char*)mmap_grown)[199999] == 0xAB);
+    printf("my_realloc grows mmap'd block via move, data preserved? %s\n", mmap_grow_preserved ? "YES" : "NO (bug)");
+
+    void *mmap_shrink = my_malloc(200000);
+    void *mmap_shrunk = my_realloc(mmap_shrink, 150000);
+    printf("my_realloc shrinks mmap'd block in place (same pointer)? %s\n", (mmap_shrunk == mmap_shrink) ? "YES" : "NO (bug)");
 
     print_list();
 

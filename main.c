@@ -273,6 +273,8 @@ void* my_realloc(void* ptr, size_t new_size) {
         if (block == global_tail) {
             global_tail = block->previous;
         };
+        // memmove, not memcpy: source and destination can overlap here (the previous
+        // block's header sits inside/adjacent to the region we're copying from).
         memmove(block_to_ptr(block->previous), ptr, block->size);
         block->previous->free = 0;
         split_block(new_size,block->previous);

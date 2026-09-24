@@ -6,6 +6,7 @@
 #define SOME_MINIMUM 16
 #define MAX_ALLOC_SIZE (1UL << 30) // 1 GB — reject absurdly large / wrapped-negative requests
 #define MMAP_THRESHOLD (128 * 1024)
+#define ALIGN16(x) (((x) + 15) & ~((size_t)15)) 
 
 typedef struct block_meta {
     size_t size;
@@ -129,6 +130,8 @@ void* my_malloc(size_t size) {
         return block_to_ptr(new_block);
     };
 
+    size = ALIGN16(size);
+
     block_meta* new_block = find_free_block(size);
 
     if (new_block != NULL) {
@@ -245,6 +248,8 @@ void* my_realloc(void* ptr, size_t new_size) {
             return ptr;
         };
     };
+
+    new_size = ALIGN16(new_size);
 
     if (new_size <= block->size) {
         split_block(new_size, block);

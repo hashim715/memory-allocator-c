@@ -51,6 +51,7 @@ void split_block(size_t size, block_meta *block) {
         new_block = (block_meta*)((char*)block_to_ptr(block) + size);
         new_block->size = (size_t)leftover;
         new_block->free = 1;
+        new_block->is_mmapped = 0;
         new_block->next = NULL;
     };
 
@@ -270,20 +271,18 @@ void* my_realloc(void* ptr, size_t new_size) {
     };
 
     if (block->previous != NULL && block->previous->free == 1 && is_physically_adjacent(block->previous,block) && block->previous->size + block->size + sizeof(block_meta) >= new_size) {
-        block->previous->size += block->size + sizeof(block_meta);
-        block->previous->next = block->next;
-        if (block->next != NULL) {
-            block->next->previous = block->previous;
-        };
-        if (block == global_tail) {
-            global_tail = block->previous;
-        };
+        block_meta *prev = block->previous;
+        size_t old_size = block->size;
+        prev->size += block->size + sizeof(block_meta);
+        prev->next = block->next;
+        if (block->next) block->next->previous = prev;
+        if (block == global_tail) global_tail = prev;
         // memmove, not memcpy: source and destination can overlap here (the previous
         // block's header sits inside/adjacent to the region we're copying from).
-        memmove(block_to_ptr(block->previous), ptr, block->size);
-        block->previous->free = 0;
-        split_block(new_size,block->previous);
-        return block_to_ptr(block->previous);
+        memmove(block_to_ptr(prev), ptr, old_size);
+        prev->free = 0;
+        split_block(new_size, prev);
+        return block_to_ptr(prev);
     };
 
     void* new_ptr = my_malloc(new_size);
@@ -422,6 +421,18 @@ int main(int argc, char** argv) {
     void *mmap_shrink = my_malloc(200000);
     void *mmap_shrunk = my_realloc(mmap_shrink, 150000);
     printf("my_realloc shrinks mmap'd block in place (same pointer)? %s\n", (mmap_shrunk == mmap_shrink) ? "YES" : "NO (bug)");
+
+    print_list();
+
+    void *small = my_malloc(32);    // becomes the free "previous"
+    void *big   = my_malloc(256);   // the block we'll grow
+    void *guard = my_malloc(32);    // stops "next" from being used
+    memset(big, 'X', 256);
+    my_free(small);
+    void *grown = my_realloc(big, 280);
+    printf("realloc merge-previous preserves data? %s\n",
+        (grown == small && ((char*)grown)[0] == 'X' && ((char*)grown)[255] == 'X') ? "YES" : "NO (bug)");
+    (void)guard;
 
     print_list();
 

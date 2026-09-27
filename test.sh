@@ -11,7 +11,7 @@ pass() { echo "  PASS: $1"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL: $1"; FAIL=$((FAIL + 1)); }
 
 echo "=== Building ==="
-clang -Wall -Wextra -o main main.c
+clang -Wall -Wextra -o main main.c allocator.c
 if [ $? -ne 0 ]; then
     echo "Build failed."
     exit 1
@@ -31,10 +31,17 @@ FIRST_LIST=$(echo "$OUTPUT" | awk '/--- list ---/{f=1} f{print} f && /^head=/{ex
 
 BLOCK_COUNT=$(echo "$FIRST_LIST" | grep -c '^\s*\[')
 
-if [ "$BLOCK_COUNT" -eq 3 ]; then
-    pass "my_malloc created 3 blocks (p1, p2, p3)"
+if [ "$BLOCK_COUNT" -eq 4 ]; then
+    pass "my_malloc created 3 used blocks (p1, p2, p3) plus 1 split leftover"
 else
-    fail "expected 3 blocks after initial my_malloc calls, got $BLOCK_COUNT"
+    fail "expected 4 blocks (3 used + 1 leftover) after initial my_malloc calls, got $BLOCK_COUNT"
+fi
+
+USED_COUNT=$(echo "$FIRST_LIST" | grep -c 'free=0')
+if [ "$USED_COUNT" -eq 3 ]; then
+    pass "exactly 3 blocks are marked used (free=0) for p1, p2, p3"
+else
+    fail "expected exactly 3 used blocks, got $USED_COUNT"
 fi
 
 if [ -n "$FIRST_LIST" ]; then

@@ -7,12 +7,15 @@ This is a learning project exploring how low-level memory allocators work under 
 ## Progress
 
 - **step1_bump.c** — Reads the current program break with `sbrk(0)` to inspect the process's initial memory layout.
+- **allocator.h / allocator.c** — The allocator itself, split out of `main.c` into its own module. `allocator.h` declares the public API, `block_meta`/`heap_stats` types, and the shared allocator state (`global_head`, `global_tail`, `current_strategy`, `total_bytes_allocated`, `live_bytes_allocated`) as `extern`; `allocator.c` holds the one real definition of each and every function's implementation. Any file that uses the allocator (`main.c`, `bench.c`) must be compiled *together* with `allocator.c` — declaring something `extern` only promises the linker it exists somewhere, it doesn't provide the code.
 - **main.c** — Requests memory directly from the OS using `mmap`, instead of relying on the deprecated `sbrk`. Includes a `block_meta` header (size/free/next) placed at the start of each `mmap`'d chunk, with `block_to_ptr`/`ptr_to_block` helpers to convert between the header and the user-facing pointer, and a `make_block()` helper that mmaps a chunk and initializes its header.
 
-  The allocator now tracks all blocks in a doubly linked list (`global_head`/`global_tail`, each `block_meta` holding both `next` and `previous`) and exposes a real `my_malloc`/`my_free` API:
+  The allocator tracks all blocks in a doubly linked list (`global_head`/`global_tail`, each `block_meta` holding both `next` and `previous`) and exposes a real `my_malloc`/`my_free` API:
+  - `set_strategy(FIRST_FIT | BEST_FIT)` switches `find_free_block()`'s search strategy at runtime: first-fit returns the first free block big enough for the request; best-fit scans the whole list and returns the *smallest* free block that still fits (returning immediately on an exact match), trading search time for potentially less wasted space per allocation.
+  - `get_heap_stats()` walks the list and reports `heap_bytes` (total mapped from the OS), `live_bytes` (currently allocated), `block_count`, `free_bytes`, and `largest_free` — with a sanity check that cross-verifies the list's total size against the `total_bytes_allocated` counter maintained by `my_malloc`.
   - `ALIGN16(x)` rounds a requested size up to the nearest multiple of 16, keeping every non-mmap'd allocation naturally aligned regardless of what the caller asked for.
   - `my_malloc(size)` rejects `0` and anything above `MAX_ALLOC_SIZE` (a 1 GB sanity cap, since a wrapped-negative `size_t` looks like a huge request), rounds the request up to a multiple of 16 via `ALIGN16()` (skipped for mmap'd blocks, which are already page-aligned), then calls `find_free_block()` to scan the list for a previously freed block big enough to reuse; only if none is found does it `mmap` a new block and append it to the tail of the list.
-  - `find_free_block()` scans the list for the first free block with enough capacity for the request.
+  - `find_free_block()` scans the list according to `current_strategy` (first-fit or best-fit) for a free block with enough capacity for the request.
   - `split_block()` carves a reused free block into two: a block sized exactly to the request (marked used) and, if enough space remains (past `sizeof(block_meta) + SOME_MINIMUM`), a leftover block marked free and reinserted into the list for future reuse — avoiding wasted space when a large freed block satisfies a much smaller request. If the remainder is too small to be worth splitting, the whole block is handed over as-is and its original size is left untouched.
   - `my_calloc(count, size)` computes `count * size`, checking for multiplication overflow before allocating, calls `my_malloc()`, and zeroes the returned memory with `memset()` — the zero-initialization `malloc` doesn't provide.
   - `my_realloc(ptr, new_size)` implements the full `realloc` contract: `ptr == NULL` behaves like `my_malloc`, `new_size == 0` behaves like `my_free`, `is_mmapped` blocks skip alignment entirely, and `new_size` is otherwise rounded up via `ALIGN16()` before shrinking (reuses `split_block()` in place) or growing (tries to absorb a physically-adjacent free neighbor — `next` first, then `previous`, `memmove`-ing the data into place if it had to shift backward — before falling back to a fresh `my_malloc` + `memcpy` + `my_free` when no adjacent space is big enough).
@@ -51,16 +54,38 @@ More steps (handling arbitrary allocation order) will be added in upcoming sessi
 
 ## Building
 
-Each step is a standalone C file for now:
+`main.c` and `bench.c` both depend on the allocator's implementation, so `allocator.c` must be compiled alongside whichever one you're building:
 
 ```sh
-clang -o main main.c
+clang -o main main.c allocator.c
 ./main
+
+clang -O2 -o bench bench.c allocator.c
+./bench first
+./bench best
 ```
+
+## Benchmarking
+
+`bench.c` stress-tests the allocator with 100,000 randomized malloc/free operations across 1,000 slots (90% small allocations of 16-512 bytes, 10% large allocations of 512-8000 bytes, fixed seed 42 for reproducibility), verifying data integrity (checking the first and last byte of every live allocation) along the way, then reports throughput and memory utilization via `get_heap_stats()`.
+
+Run with `./bench first` or `./bench best` to compare strategies:
+
+| Metric | First-fit | Best-fit |
+|---|---|---|
+| Throughput | 4,209,640 ops/sec | 1,953,163 ops/sec |
+| Heap size (OS) | 524,288 bytes | 540,672 bytes |
+| Live bytes | 352,057 bytes | 352,057 bytes |
+| Utilization | 67.15% | 65.11% |
+| Blocks in list | 603 | 548 |
+| Largest free block | 62,464 bytes | 43,328 bytes |
+| External fragmentation | 56.43% | 73.29% |
+
+First-fit is roughly **2x faster** here, since it returns on the first match instead of scanning the whole list every time. Best-fit doesn't win on memory efficiency either in this run — despite fewer, larger blocks overall, its free space ends up more fragmented (higher external fragmentation, smaller largest-free-block), a known real-world tendency of best-fit: by always taking the tightest fit, it tends to leave behind many small, awkward-sized leftover fragments instead of a few large reusable ones.
 
 ## Testing
 
-`test.sh` builds `main.c` and checks its output in six phases:
+`test.sh` builds `main.c` (with `allocator.c`) and checks its output in six phases:
 
 - **Phase 1** — confirms `my_malloc` actually allocates memory (the initial 3 blocks show up in `print_list`, marked in-use).
 - **Phase 2** — confirms `find_free_block`, `my_free`, and the linked list work together: a freed block gets reused (including a block in the *middle* of the list), and `print_list` reflects head/tail pointers and free/used status correctly.

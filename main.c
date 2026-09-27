@@ -51,7 +51,7 @@ int main(int argc, char** argv) {
     // in place. Growing tries to absorb an adjacent free neighbor first, and only
     // falls back to a fresh my_malloc + copy + my_free if no adjacent space fits.
 
-   char *z = (unsigned char*)my_calloc(10, sizeof(char));
+   unsigned char *z = (unsigned char*)my_calloc(10, sizeof(char));
     int all_zero = 1;
     for (size_t i = 0; i < 10; i++) {
         if (z[i] != 0) {
